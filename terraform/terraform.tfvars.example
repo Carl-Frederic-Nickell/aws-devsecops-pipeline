@@ -1,0 +1,19 @@
+# Example Terraform Variables Configuration
+# Copy this file to terraform.tfvars and customize for your environment
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your values
+#   terraform init
+#   terraform plan
+#
+# Note: terraform.tfvars is in .gitignore and will not be committed
+
+# AWS region where resources will be created
+aws_region = "us-east-1"  # Options: us-east-1, us-west-2, eu-central-1, etc.
+
+# Environment name (used in resource naming)
+environment = "dev"  # Options: dev, staging, prod
+
+# Project name (used as prefix for resource names)
+project_name = "devsecops"  # Keep lowercase and alphanumeric

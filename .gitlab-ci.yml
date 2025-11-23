@@ -1,0 +1,259 @@
+# GitLab CI/CD Pipeline for DevSecOps Pipeline Project
+# Security-focused pipeline with automated scanning
+#
+# SETUP INSTRUCTIONS:
+# 1. Configure the following CI/CD variables in GitLab (Settings → CI/CD → Variables):
+#    - AWS_ACCESS_KEY_ID (masked, protected)
+#    - AWS_SECRET_ACCESS_KEY (masked, protected)
+#    - AWS_DEFAULT_REGION (e.g., us-east-1)
+#
+# 2. Update backend configuration in terraform/main.tf with your S3 bucket
+#
+# 3. Push to main branch to trigger pipeline
+
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}/terraform
+  TF_IN_AUTOMATION: "true"
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+  TERRAFORM_VERSION: "1.5.7"
+  TFSEC_VERSION: "1.28.4"
+  CHECKOV_VERSION: "3.0.0"
+
+# Define pipeline stages
+stages:
+  - validate
+  - security-scan
+  - plan
+  - apply
+  - verify
+  - destroy
+
+# Cache Terraform providers for faster builds
+cache:
+  key: terraform-${CI_COMMIT_REF_SLUG}-protected
+  paths:
+    - ${TF_ROOT}/.terraform/
+    - ${TF_ROOT}/.terraform.lock.hcl
+
+# ============== VALIDATION STAGE ==============
+
+terraform:format:
+  stage: validate
+  image:
+    name: hashicorp/terraform:${TERRAFORM_VERSION}
+    entrypoint: [""]  # Override entrypoint to allow shell commands
+  before_script: []
+  script:
+    - echo "=== Checking Terraform Format ==="
+    - cd ${TF_ROOT}
+    - terraform fmt -check -recursive -diff
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+terraform:validate:
+  stage: validate
+  image:
+    name: hashicorp/terraform:${TERRAFORM_VERSION}
+    entrypoint: [""]
+  before_script:
+    - cd ${TF_ROOT}
+    - terraform init -backend=false
+  script:
+    - echo "=== Validating Terraform Configuration ==="
+    - terraform validate
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ============== SECURITY SCANNING STAGE ==============
+
+tfsec:scan:
+  stage: security-scan
+  image:
+    name: aquasec/tfsec:v${TFSEC_VERSION}
+    entrypoint: [""]
+  before_script: []
+  script:
+    - echo "=== Running tfsec Security Scan ==="
+    - |
+      tfsec ${TF_ROOT} \
+        --format json \
+        --out tfsec-report.json \
+        --no-color || true
+    - |
+      tfsec ${TF_ROOT} \
+        --format default \
+        --no-color
+  artifacts:
+    reports:
+      terraform: tfsec-report.json
+    paths:
+      - tfsec-report.json
+    expire_in: 1 week
+  allow_failure: true  # Don't block pipeline on warnings
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+checkov:scan:
+  stage: security-scan
+  image:
+    name: bridgecrew/checkov:${CHECKOV_VERSION}
+    entrypoint: [""]
+  before_script: []
+  script:
+    - echo "=== Running Checkov Security Scan ==="
+    - |
+      checkov -d ${TF_ROOT} \
+        --framework terraform \
+        --output json \
+        --output-file-path . \
+        --quiet || true
+    - |
+      checkov -d ${TF_ROOT} \
+        --framework terraform \
+        --compact
+  artifacts:
+    paths:
+      - results_json.json
+    expire_in: 1 week
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+secrets:scan:
+  stage: security-scan
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  before_script: []
+  script:
+    - echo "=== Scanning for Secrets ==="
+    - |
+      trufflehog filesystem ${CI_PROJECT_DIR} \
+        --json \
+        --no-verification || true
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ============== TERRAFORM PLAN STAGE ==============
+
+terraform:plan:
+  stage: plan
+  image:
+    name: hashicorp/terraform:${TERRAFORM_VERSION}
+    entrypoint: [""]
+  before_script:
+    - echo "=== Setting up AWS Credentials ==="
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "ERROR: AWS credentials not configured in GitLab CI/CD variables"
+        exit 1
+      fi
+    - export AWS_REGION=${AWS_DEFAULT_REGION}
+  script:
+    - echo "=== Planning Terraform Infrastructure ==="
+    - cd ${TF_ROOT}
+    - terraform init
+    - terraform plan -out=tfplan
+    - terraform show -json tfplan > plan.json
+  artifacts:
+    paths:
+      - ${TF_ROOT}/tfplan
+      - ${TF_ROOT}/plan.json
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ============== TERRAFORM APPLY STAGE ==============
+
+terraform:apply:
+  stage: apply
+  image:
+    name: hashicorp/terraform:${TERRAFORM_VERSION}
+    entrypoint: [""]
+  before_script:
+    - echo "=== Setting up AWS Credentials ==="
+    - export AWS_REGION=${AWS_DEFAULT_REGION}
+  script:
+    - echo "=== Applying Terraform Infrastructure ==="
+    - cd ${TF_ROOT}
+    - terraform init
+    - terraform apply -auto-approve tfplan
+    - terraform output -json > outputs.json
+  artifacts:
+    paths:
+      - ${TF_ROOT}/outputs.json
+    expire_in: 1 week
+  when: manual  # Requires manual approval in GitLab UI
+  needs:
+    - terraform:plan
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ============== VERIFICATION STAGE ==============
+
+verify:deployment:
+  stage: verify
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  before_script:
+    - echo "=== Setting up AWS Credentials ==="
+    - export AWS_REGION=${AWS_DEFAULT_REGION}
+  script:
+    - echo "=== Verifying S3 Buckets ==="
+    - |
+      aws s3 ls | grep devsecops || echo "No devsecops buckets found"
+    - |
+      echo "=== Checking Bucket Encryption ==="
+      for bucket in $(aws s3 ls | grep devsecops | awk '{print $3}'); do
+        echo "Checking encryption for $bucket"
+        aws s3api get-bucket-encryption --bucket $bucket || echo "Encryption check failed"
+      done
+    - |
+      echo "=== Checking Bucket Versioning ==="
+      for bucket in $(aws s3 ls | grep devsecops | awk '{print $3}'); do
+        echo "Checking versioning for $bucket"
+        aws s3api get-bucket-versioning --bucket $bucket
+      done
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  needs:
+    - terraform:apply
+  when: on_success
+
+# ============== DESTROY STAGE ==============
+
+terraform:destroy:
+  stage: destroy
+  image:
+    name: hashicorp/terraform:${TERRAFORM_VERSION}
+    entrypoint: [""]
+  before_script:
+    - echo "=== Setting up AWS Credentials ==="
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "ERROR: AWS credentials not configured in GitLab CI/CD variables"
+        exit 1
+      fi
+    - export AWS_REGION=${AWS_DEFAULT_REGION}
+  script:
+    - echo "WARNING - This will DESTROY all infrastructure in AWS!"
+    - echo "=== Initializing Terraform ==="
+    - cd ${TF_ROOT}
+    - terraform init
+    - echo "=== Generating Destroy Plan ==="
+    - terraform plan -destroy -out=destroy.tfplan
+    - terraform show destroy.tfplan
+    - echo "=== Destroying Infrastructure ==="
+    - terraform apply -auto-approve destroy.tfplan
+    - echo "Infrastructure destroyed successfully"
+  when: manual  # Manual trigger only - prevents accidental deletion
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  environment:
+    name: production
+    action: stop
