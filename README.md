@@ -544,17 +544,67 @@ terraform:apply:
 
 ## 📸 Screenshots
 
-### Pipeline Success
-![GitLab Pipeline](docs/images/pipeline-success.png)
-*Complete CI/CD pipeline showing all stages passing successfully*
+### CI/CD Pipeline
+
+#### Pipeline Overview
+![Pipeline Success](screenshots/01-pipeline-success.png)
+*Complete CI/CD pipeline with all stages passing (Validate → Security Scan → Plan → Apply → Verify)*
+
+#### Pipeline Jobs Detail
+![Pipeline Jobs](screenshots/02-pipeline-jobs-detail.png)
+*Detailed view of all pipeline jobs and their execution status*
 
 ### Security Scanning
-![tfsec Results](docs/images/tfsec-scan.png)
-*tfsec security scanner showing 18/19 checks passed*
+
+#### tfsec Scanner
+![tfsec Results](screenshots/03-security-scan-tfsec.png)
+*tfsec security scanner results - Terraform-specific security checks*
+
+#### Checkov Scanner
+![Checkov Results](screenshots/04-security-scan-checkov.png)
+*Checkov policy compliance validation results*
+
+### Terraform Execution
+
+#### Terraform Plan
+![Terraform Plan](screenshots/05-terraform-plan.png)
+*Terraform plan output showing infrastructure changes before deployment*
+
+#### Terraform Apply
+![Terraform Apply](screenshots/06-terraform-apply.png)
+*Terraform apply execution creating AWS resources*
+
+#### Deployment Verification
+![Verify Deployment](screenshots/07-verify-deployment.png)
+*Automated verification stage confirming successful resource creation*
 
 ### AWS Console
-![S3 Buckets](docs/images/aws-s3-buckets.png)
-*Deployed buckets with security configurations visible*
+
+#### S3 Buckets Overview
+![S3 Buckets](screenshots/08-aws-s3-buckets.png)
+*Deployed S3 buckets in AWS Console with security configurations*
+
+#### Bucket Security Settings
+![Bucket Security](screenshots/09-aws-bucket-security.png)
+*Detailed security settings: encryption, versioning, public access blocking*
+
+#### Logs Bucket
+![Logs Bucket](screenshots/10-aws-logs-bucket.png)
+*Dedicated logging bucket for access logs*
+
+### GitLab Configuration
+
+#### Project Structure
+![GitLab Structure](screenshots/11-gitlab-project-structure.png)
+*GitLab repository structure and organization*
+
+#### CI/CD Variables
+![CI/CD Variables](screenshots/12-gitlab-cicd-variables.png)
+*GitLab CI/CD variables configuration (AWS credentials masked)*
+
+#### Terraform Code
+![Terraform Code](screenshots/13-terraform-code.png)
+*Terraform infrastructure code with security best practices*
 
 ---
 
