@@ -77,28 +77,56 @@ This project demonstrates a complete DevSecOps workflow for deploying secure clo
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      GitLab CI/CD Pipeline                   │
+│                 GitLab CI/CD Pipeline (Build-Time)           │
 │  ┌──────────┐  ┌──────────┐  ┌──────┐  ┌───────┐  ┌──────┐ │
 │  │ Validate │→│  Security │→│ Plan │→│ Apply │→│Verify│ │
 │  │          │  │   Scan   │  │      │  │(Manual)│ │      │ │
 │  └──────────┘  └──────────┘  └──────┘  └───────┘  └──────┘ │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            ↓ deploys
 ┌─────────────────────────────────────────────────────────────┐
 │                        AWS Account                           │
+│                                                              │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │  Application S3 Bucket                                 │ │
-│  │  • Encryption: AES-256                                 │ │
-│  │  • Versioning: Enabled                                 │ │
-│  │  • Public Access: Blocked                              │ │
-│  │  • Logging: → Logs Bucket                              │ │
+│  │  Application Infrastructure                            │ │
+│  │  ┌──────────────────┐  ┌──────────────────┐           │ │
+│  │  │ Application S3   │  │ Logs S3 Bucket   │           │ │
+│  │  │ • AES-256        │→│ • AES-256        │           │ │
+│  │  │ • Versioned      │  │ • Versioned      │           │ │
+│  │  │ • Public Blocked │  │ • Public Blocked │           │ │
+│  │  └──────────────────┘  └──────────────────┘           │ │
 │  └────────────────────────────────────────────────────────┘ │
-│                            ↓ logs                            │
+│                                                              │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │  Logs S3 Bucket                                        │ │
-│  │  • Encryption: AES-256                                 │ │
-│  │  • Versioning: Enabled                                 │ │
-│  │  • Public Access: Blocked                              │ │
+│  │  Security Monitoring Stack (Runtime - FREE)            │ │
+│  │                                                        │ │
+│  │  ┌─────────────┐    ┌──────────────────┐            │ │
+│  │  │ CloudTrail  │───→│ CloudWatch Logs  │            │ │
+│  │  │ (All APIs)  │    │ + Metric Filters │            │ │
+│  │  └─────────────┘    └──────────────────┘            │ │
+│  │                              ↓                         │ │
+│  │  ┌────────────────────────────────────────────────┐  │ │
+│  │  │ Real-Time Alarms (< 5 min)                     │  │ │
+│  │  │ • Unauthorized API calls                       │  │ │
+│  │  │ • Root account usage                           │  │ │
+│  │  │ • IAM/SG/S3 policy changes                     │  │ │
+│  │  └────────────────────────────────────────────────┘  │ │
+│  │                              ↓                         │ │
+│  │  ┌──────────────┐    ┌───────────────────────────┐  │ │
+│  │  │ EventBridge  │───→│ Lambda Security Monitor   │  │ │
+│  │  │ (Daily 8 AM) │    │ • IAM Access Analyzer     │  │ │
+│  │  └──────────────┘    │ • S3 public buckets       │  │ │
+│  │                      │ • Security groups 0.0.0.0 │  │ │
+│  │  ┌──────────────┐   │ • IAM MFA compliance      │  │ │
+│  │  │ IAM Access   │──→│                           │  │ │
+│  │  │ Analyzer     │   └───────────────────────────┘  │ │
+│  │  └──────────────┘                ↓                  │ │
+│  │                      ┌───────────────────────────┐  │ │
+│  │                      │ SNS Topic                 │  │ │
+│  │                      │ Email: security@example...│  │ │
+│  │                      └───────────────────────────┘  │ │
+│  │                                                        │ │
+│  │  Cost: $0.00/month (19 resources, all FREE tier)    │ │
 │  └────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
