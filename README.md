@@ -116,6 +116,24 @@ This project demonstrates a complete DevSecOps workflow for deploying secure clo
 
 ## 🔒 Security Highlights
 
+### Two-Layer Security Approach
+
+#### Build-Time Security (CI/CD Pipeline)
+- **tfsec, Checkov, Trufflehog**: Automated scanning before deployment
+- **Manual approval gates**: Human review for production changes
+- **Secret detection**: Prevents credential leaks
+
+#### Runtime Security Monitoring (AWS)
+**Complete FREE tier security stack deployed in base infrastructure:**
+
+- ✅ **Real-time detection** (<5 min): CloudWatch alarms for unauthorized API calls, root usage, policy changes
+- ✅ **Daily security scans**: Lambda function checking IAM policies, S3 public access, security groups, MFA compliance
+- ✅ **IAM Access Analyzer**: Continuous policy scanning for external access
+- ✅ **Email alerts**: SNS notifications for all security findings
+- ✅ **Cost**: $0.00/month (19 resources, all FREE tier)
+
+📚 **[Full Runtime Security Documentation →](docs/security-monitoring/README.md)**
+
 ### Implemented Controls
 
 #### 1. S3 Bucket Security
