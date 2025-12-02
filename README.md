@@ -16,11 +16,14 @@ A production-ready DevSecOps implementation demonstrating Infrastructure as Code
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
+- [Multi-Environment Setup](#multi-environment-setup)
 - [Security Highlights](#security-highlights)
 - [Pipeline Stages](#pipeline-stages)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Deployment Guide](#deployment-guide)
+- [Cleanup & Destruction](#cleanup--destruction)
+- [Implementation Challenges](#implementation-challenges)
 - [Cost Analysis](#cost-analysis)
 - [Lessons Learned](#lessons-learned)
 - [Contributing](#contributing)
@@ -139,6 +142,69 @@ This project demonstrates a complete DevSecOps workflow for deploying secure clo
 - **Security Scanning**: tfsec, Checkov, Trufflehog
 - **Cloud Provider**: AWS
 - **State Management**: S3 backend with DynamoDB locking
+
+---
+
+## 🌍 Multi-Environment Setup
+
+This project demonstrates real-world multi-environment deployment using **Terraform Workspaces** with branch-based workflows.
+
+### Environment Strategy
+
+Three isolated environments with progressive deployment:
+
+```
+dev branch      → Dev Environment      (Auto-deploy, fast iteration)
+                     ↓
+staging branch  → Staging Environment  (Manual approval, full security scans)
+                     ↓
+main branch     → Production           (Strict approval, full security scans)
+```
+
+### Branch → Environment Mapping
+
+| Branch | Workspace | Environment | Deployment | Security Scans |
+|--------|-----------|-------------|------------|----------------|
+| `dev` | `dev` | Development | Auto (on success) | ❌ Skipped (fast iteration) |
+| `staging` | `staging` | Staging | Manual approval | ✅ Full scans (tfsec, checkov, trufflehog) |
+| `main` | `prod` | Production | Strict manual approval | ✅ Full scans + warnings |
+
+### Infrastructure Isolation
+
+Each environment gets isolated infrastructure:
+
+```
+Workspace: dev
+├── S3 Bucket: devsecops-dev-{ACCOUNT_ID}
+└── S3 Logs: devsecops-logs-dev-{ACCOUNT_ID}
+
+Workspace: staging
+├── S3 Bucket: devsecops-staging-{ACCOUNT_ID}
+└── S3 Logs: devsecops-logs-staging-{ACCOUNT_ID}
+
+Workspace: prod
+├── S3 Bucket: devsecops-prod-{ACCOUNT_ID}
+└── S3 Logs: devsecops-logs-prod-{ACCOUNT_ID}
+```
+
+### State Management
+
+Terraform automatically manages separate state files per workspace:
+- **Dev**: `s3://YOUR-BUCKET/env:/dev/devsecops-pipeline/terraform.tfstate`
+- **Staging**: `s3://YOUR-BUCKET/env:/staging/devsecops-pipeline/terraform.tfstate`
+- **Prod**: `s3://YOUR-BUCKET/env:/prod/devsecops-pipeline/terraform.tfstate`
+
+### Trade-off: Developer Velocity vs. Security
+
+**Design Decision**: Skip security scans on dev branch
+
+**Rationale**:
+- Dev iteration: ~1 minute (validation only)
+- Full security scan: ~4 minutes (validation + 3 scanners)
+- Same code is scanned when promoted to staging/prod
+- Real-world companies prioritize dev velocity with security gates at promotion points
+
+**Security stance**: Not compromised—all production-bound code undergoes full scanning before reaching staging/prod.
 
 ---
 
@@ -445,6 +511,161 @@ image:
 
 ---
 
+## 🗑️ Cleanup & Destruction
+
+### Infrastructure Lifecycle Management
+
+This project demonstrates infrastructure lifecycle management with easy cleanup capabilities.
+
+#### Destroy Environments
+
+**Option 1: Via GitLab Pipeline (Recommended)**
+
+Navigate to **GitLab → Pipelines → Select completed pipeline → Manual Actions**:
+
+```bash
+# Available destroy buttons per environment:
+terraform:destroy:dev      # Destroys dev environment
+terraform:destroy:staging  # Destroys staging environment
+terraform:destroy:prod     # Destroys production environment
+```
+
+**Option 2: Via Terraform CLI (Local)**
+
+```bash
+cd terraform
+
+# Select the workspace you want to destroy
+terraform workspace select dev    # or staging, or prod
+
+# Generate destroy plan and apply
+terraform plan -destroy -out=destroy.tfplan
+terraform show destroy.tfplan     # Review what will be destroyed
+terraform apply destroy.tfplan    # Execute destruction
+
+# Alternative: Direct destroy command
+terraform destroy -auto-approve   # ⚠️ Use with caution!
+```
+
+#### What Gets Destroyed
+
+When you destroy an environment workspace, the following resources are removed:
+
+✅ Application S3 bucket (`devsecops-{env}-{account-id}`)
+✅ Logs S3 bucket (`devsecops-logs-{env}-{account-id}`)
+✅ All bucket configurations (encryption, versioning, logging)
+✅ All objects in buckets (due to `force_destroy = true`)
+
+#### What Remains
+
+The following are NOT destroyed and remain shared across all projects:
+
+🔒 Terraform state bucket (in S3)
+🔒 DynamoDB state locking table
+🔒 Your AWS account and IAM users/roles
+
+### Cost Control Strategy
+
+**Learning Project Pattern:**
+- Deploy to dev/staging for learning and testing
+- Destroy environments when not actively using
+- Re-deploy anytime with `git push` to respective branch
+- **Monthly cost when destroyed: $0.00**
+
+---
+
+## 🐛 Implementation Challenges & Solutions
+
+### Real-World Issues Encountered
+
+This section documents actual challenges faced during implementation and their solutions—valuable learning for anyone building similar infrastructure.
+
+#### 1. Terraform Workspace Initialization Issue
+
+**Problem**: `terraform init` prompted interactively for workspace selection in CI/CD pipelines, causing "EOF" errors.
+
+**Solution**: Added `-input=false` flag and proper workspace selection sequencing:
+```yaml
+script:
+  - WORKSPACE_NAME=${TF_WORKSPACE}
+  - unset TF_WORKSPACE                    # Clear env var before init
+  - terraform init -input=false           # Non-interactive init
+  - terraform workspace select ${WORKSPACE_NAME} 2>/dev/null || terraform workspace new ${WORKSPACE_NAME}
+  - export TF_WORKSPACE=${WORKSPACE_NAME} # Re-export after selection
+```
+
+**Learning**: CI/CD pipelines require non-interactive Terraform execution. Always use `-input=false`.
+
+#### 2. Environment Variable Collision
+
+**Problem**: All workspaces created buckets with "dev" naming because `var.environment` defaulted to "dev" for all workspaces, causing bucket name conflicts.
+
+**Solution**: Implemented `local.environment` that maps directly to workspace name:
+```hcl
+locals {
+  environment = terraform.workspace == "default" ? var.environment : terraform.workspace
+}
+
+# Use local.environment instead of var.environment
+bucket = "${var.project_name}-${local.environment}-${data.aws_caller_identity.current.account_id}"
+```
+
+**Learning**: Workspace-specific logic requires locals, not just input variables.
+
+#### 3. S3 Bucket Destruction Blocked by Versioning
+
+**Problem**: Buckets with versioning couldn't be destroyed—`BucketNotEmpty` error even after deleting all visible objects.
+
+**Solution**: Added `force_destroy = true` to bucket resources:
+```hcl
+resource "aws_s3_bucket" "app" {
+  bucket        = "${var.project_name}-${local.environment}-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true  # Allows deletion with versioned objects
+}
+```
+
+**Learning**: Versioned S3 buckets require `force_destroy` for easy cleanup in dev/learning environments. For production, remove this flag to prevent accidental data loss.
+
+#### 4. CI/CD Variable Protection Issues
+
+**Problem**: AWS credentials marked as "Protected" were only accessible to protected branches (main), blocking dev and staging pipelines.
+
+**Solution**: Unprotected credentials while keeping them masked:
+```bash
+# In GitLab: Settings → CI/CD → Variables
+AWS_ACCESS_KEY_ID: Masked=true, Protected=false
+AWS_SECRET_ACCESS_KEY: Masked=true, Protected=false
+```
+
+**Learning**: CI/CD variable protection restricts branch access. For multi-environment workflows, use masked (hides value) rather than protected (restricts branches).
+
+#### 5. Artifact Path Resolution in Multi-Stage Pipeline
+
+**Problem**: Apply stage couldn't find plan artifacts (`tfplan-${TF_WORKSPACE}`) because `TF_WORKSPACE` was unset during init.
+
+**Solution**: Re-export workspace variable after workspace selection:
+```yaml
+script:
+  - WORKSPACE_NAME=${TF_WORKSPACE}
+  - unset TF_WORKSPACE
+  - terraform init -input=false
+  - terraform workspace select ${WORKSPACE_NAME}
+  - export TF_WORKSPACE=${WORKSPACE_NAME}  # Critical: Re-export
+  - terraform apply -auto-approve tfplan-${TF_WORKSPACE}
+```
+
+**Learning**: Environment variable management across multi-step scripts requires explicit sequencing.
+
+### Key Takeaways
+
+1. **CI/CD is different from local development**: Non-interactive flags, explicit variable management
+2. **Multi-environment adds complexity**: State isolation, variable scoping, naming conflicts
+3. **Security vs. Usability**: Protected variables vs. branch accessibility
+4. **Always plan for cleanup**: `force_destroy` for dev/learning, remove for production
+5. **Document your journey**: Real-world challenges are valuable learning material
+
+---
+
 ## 💰 Cost Analysis
 
 ### Monthly Cost Breakdown
@@ -534,11 +755,12 @@ terraform:apply:
 
 ### What I'd Do Differently
 
-1. **Start with workspaces** for multi-environment support
+1. ~~**Start with workspaces** for multi-environment support~~ ✅ **Implemented!**
 2. **Add Terraform modules** for better code reuse
 3. **Implement policy-as-code** earlier (OPA/Sentinel)
 4. **Use Terraform Cloud** for enhanced collaboration
 5. **Add automated testing** (Terratest or kitchen-terraform)
+6. **Implement GitOps** with ArgoCD or Flux for automated deployments
 
 ---
 
@@ -635,11 +857,14 @@ Contributions are welcome! This project is designed for learning and experimenta
 ## 📊 Project Statistics
 
 - **Lines of Terraform**: ~250
-- **CI/CD Pipeline Jobs**: 9
+- **Environments**: 3 (dev, staging, prod)
+- **CI/CD Pipeline Jobs**: 27 (9 jobs × 3 environments)
 - **Security Scanners**: 3 (tfsec, Checkov, Trufflehog)
-- **AWS Resources Created**: 12
-- **Pipeline Execution Time**: ~3 minutes
-- **Cost**: $0.00/month (Free Tier)
+- **AWS Resources Per Environment**: 12
+- **Pipeline Execution Time**:
+  - Dev: ~1 minute (fast path)
+  - Staging/Prod: ~4 minutes (full security scans)
+- **Cost Per Environment**: $0.00/month (Free Tier)
 
 ---
 
@@ -690,9 +915,10 @@ Security & DevOps Engineer | Ex-Bundeswehr | Production SIEM & CI/CD
 
 ---
 
-**Project Status**: ✅ Complete (Portfolio Demonstration)
-**Last Updated**: November 2025
+**Project Status**: ✅ Complete & Production-Ready (Multi-Environment)
+**Last Updated**: December 2025
+**Environments**: Dev, Staging, Production
 **AWS Region**: Configurable (default: us-east-1)
 
-⭐ If this project helped you learn DevSecOps, please consider starring the repository!
+⭐ If this project helped you learn DevSecOps and multi-environment deployments, please consider starring the repository!
 

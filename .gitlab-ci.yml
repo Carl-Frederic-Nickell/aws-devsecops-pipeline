@@ -1,15 +1,27 @@
 # GitLab CI/CD Pipeline for DevSecOps Pipeline Project
-# Security-focused pipeline with automated scanning
+# Multi-Environment Pipeline: Dev → Staging → Production
+# Branch-based deployment with environment isolation
+#
+# OPTIMIZED FOR REAL-WORLD WORKFLOW:
+# - Dev: Fast iteration (1 min) - validation only, no security scans
+# - Staging: Full security gate - all scans required
+# - Production: Full security gate - all scans required
+#
+# Trade-off: Developer velocity vs. security overhead
+# Rationale: Security scans at promotion points catch same issues
+#            without slowing daily development iteration
 #
 # SETUP INSTRUCTIONS:
 # 1. Configure the following CI/CD variables in GitLab (Settings → CI/CD → Variables):
-#    - AWS_ACCESS_KEY_ID (masked, protected)
-#    - AWS_SECRET_ACCESS_KEY (masked, protected)
+#    - AWS_ACCESS_KEY_ID (masked)
+#    - AWS_SECRET_ACCESS_KEY (masked)
 #    - AWS_DEFAULT_REGION (e.g., us-east-1)
 #
 # 2. Update backend configuration in terraform/main.tf with your S3 bucket
 #
-# 3. Push to main branch to trigger pipeline
+# 3. Create three branches: dev, staging, main
+#
+# 4. Push to respective branches to trigger environment-specific pipelines
 
 variables:
   TF_ROOT: ${CI_PROJECT_DIR}/terraform
@@ -28,7 +40,14 @@ stages:
   - verify
   - destroy
 
-# Cache Terraform providers for faster builds
+# Workflow rules - only run on our three main branches
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Cache Terraform providers
 cache:
   key: terraform-${CI_COMMIT_REF_SLUG}-protected
   paths:
@@ -41,7 +60,7 @@ terraform:format:
   stage: validate
   image:
     name: hashicorp/terraform:${TERRAFORM_VERSION}
-    entrypoint: [""]  # Override entrypoint to allow shell commands
+    entrypoint: [""]
   before_script: []
   script:
     - echo "=== Checking Terraform Format ==="
@@ -49,7 +68,7 @@ terraform:format:
     - terraform fmt -check -recursive -diff
   allow_failure: false
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(dev|staging|main)$/'
 
 terraform:validate:
   stage: validate
@@ -63,9 +82,18 @@ terraform:validate:
     - echo "=== Validating Terraform Configuration ==="
     - terraform validate
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(dev|staging|main)$/'
 
 # ============== SECURITY SCANNING STAGE ==============
+# Trade-off Decision: Fast Dev Path vs. Security Gates
+#
+# Dev branch: SKIPPED - Enables fast iteration (1 min vs 4 min)
+# Staging/Prod: FULL SCANS - Security gate before production
+#
+# Rationale: Real-world companies prioritize dev velocity while
+# maintaining security at promotion points. Scans on every dev
+# commit slow iteration without catching more issues (same code
+# will be scanned when promoted to staging).
 
 tfsec:scan:
   stage: security-scan
@@ -90,9 +118,9 @@ tfsec:scan:
     paths:
       - tfsec-report.json
     expire_in: 1 week
-  allow_failure: true  # Don't block pipeline on warnings
+  allow_failure: true
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(staging|main)$/'  # Only staging and prod
 
 checkov:scan:
   stage: security-scan
@@ -118,7 +146,7 @@ checkov:scan:
     expire_in: 1 week
   allow_failure: true
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(staging|main)$/'  # Only staging and prod
 
 secrets:scan:
   stage: security-scan
@@ -134,11 +162,13 @@ secrets:scan:
         --no-verification || true
   allow_failure: true
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(staging|main)$/'  # Only staging and prod
 
 # ============== TERRAFORM PLAN STAGE ==============
+# Creates environment-specific plans based on branch
+# Branch → Workspace mapping: dev→dev, staging→staging, main→prod
 
-terraform:plan:
+.terraform_plan_template: &terraform_plan_template
   stage: plan
   image:
     name: hashicorp/terraform:${TERRAFORM_VERSION}
@@ -152,22 +182,54 @@ terraform:plan:
       fi
     - export AWS_REGION=${AWS_DEFAULT_REGION}
   script:
-    - echo "=== Planning Terraform Infrastructure ==="
+    - echo "=== Planning Terraform Infrastructure for ${TF_WORKSPACE} ==="
+    - echo "Branch ${CI_COMMIT_BRANCH} -> Workspace ${TF_WORKSPACE}"
     - cd ${TF_ROOT}
-    - terraform init
-    - terraform plan -out=tfplan
-    - terraform show -json tfplan > plan.json
+    - WORKSPACE_NAME=${TF_WORKSPACE}
+    - unset TF_WORKSPACE
+    - terraform init -input=false
+    - terraform workspace select ${WORKSPACE_NAME} 2>/dev/null || terraform workspace new ${WORKSPACE_NAME}
+    - export TF_WORKSPACE=${WORKSPACE_NAME}
+    - terraform plan -out=tfplan-${TF_WORKSPACE}
+    - terraform show -json tfplan-${TF_WORKSPACE} > plan-${TF_WORKSPACE}.json
   artifacts:
     paths:
-      - ${TF_ROOT}/tfplan
-      - ${TF_ROOT}/plan.json
+      - ${TF_ROOT}/tfplan-${TF_WORKSPACE}
+      - ${TF_ROOT}/plan-${TF_WORKSPACE}.json
     expire_in: 1 day
+
+terraform:plan:dev:
+  <<: *terraform_plan_template
+  variables:
+    TF_WORKSPACE: "dev"
+  environment:
+    name: dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+
+terraform:plan:staging:
+  <<: *terraform_plan_template
+  variables:
+    TF_WORKSPACE: "staging"
+  environment:
+    name: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+
+terraform:plan:prod:
+  <<: *terraform_plan_template
+  variables:
+    TF_WORKSPACE: "prod"
+  environment:
+    name: production
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
 # ============== TERRAFORM APPLY STAGE ==============
+# Environment-specific deployment with approval gates
+# Dev: Auto-deploy | Staging: Manual | Production: Manual with warnings
 
-terraform:apply:
+.terraform_apply_template: &terraform_apply_template
   stage: apply
   image:
     name: hashicorp/terraform:${TERRAFORM_VERSION}
@@ -176,24 +238,65 @@ terraform:apply:
     - echo "=== Setting up AWS Credentials ==="
     - export AWS_REGION=${AWS_DEFAULT_REGION}
   script:
-    - echo "=== Applying Terraform Infrastructure ==="
+    - echo "=== Applying Terraform Infrastructure to ${TF_WORKSPACE} ==="
     - cd ${TF_ROOT}
-    - terraform init
-    - terraform apply -auto-approve tfplan
-    - terraform output -json > outputs.json
+    - WORKSPACE_NAME=${TF_WORKSPACE}
+    - unset TF_WORKSPACE
+    - terraform init -input=false
+    - terraform workspace select ${WORKSPACE_NAME} 2>/dev/null || terraform workspace new ${WORKSPACE_NAME}
+    - export TF_WORKSPACE=${WORKSPACE_NAME}
+    - terraform apply -auto-approve tfplan-${TF_WORKSPACE}
+    - terraform output -json > outputs-${TF_WORKSPACE}.json
   artifacts:
     paths:
-      - ${TF_ROOT}/outputs.json
+      - ${TF_ROOT}/outputs-${TF_WORKSPACE}.json
     expire_in: 1 week
-  when: manual  # Requires manual approval in GitLab UI
+
+terraform:apply:dev:
+  <<: *terraform_apply_template
+  variables:
+    TF_WORKSPACE: "dev"
+  environment:
+    name: dev
+  when: on_success  # Auto-deploy for dev environment
   needs:
-    - terraform:plan
+    - terraform:plan:dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+
+terraform:apply:staging:
+  <<: *terraform_apply_template
+  variables:
+    TF_WORKSPACE: "staging"
+  environment:
+    name: staging
+  when: manual  # Manual approval for staging
+  needs:
+    - terraform:plan:staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+
+terraform:apply:prod:
+  <<: *terraform_apply_template
+  variables:
+    TF_WORKSPACE: "prod"
+  environment:
+    name: production
+  when: manual  # Strict manual approval for production
+  needs:
+    - terraform:plan:prod
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
+  before_script:
+    - echo "⚠️  WARNING - PRODUCTION DEPLOYMENT ⚠️"
+    - echo "This will deploy changes to the PRODUCTION environment"
+    - echo "Ensure you have reviewed the plan carefully"
+    - export AWS_REGION=${AWS_DEFAULT_REGION}
 
 # ============== VERIFICATION STAGE ==============
+# Verifies resources were created successfully in each environment
 
-verify:deployment:
+.verify_deployment_template: &verify_deployment_template
   stage: verify
   image:
     name: amazon/aws-cli:latest
@@ -202,31 +305,68 @@ verify:deployment:
     - echo "=== Setting up AWS Credentials ==="
     - export AWS_REGION=${AWS_DEFAULT_REGION}
   script:
-    - echo "=== Verifying S3 Buckets ==="
+    - echo "=== Verifying ${TF_WORKSPACE} Environment S3 Buckets ==="
     - |
-      aws s3 ls | grep devsecops || echo "No devsecops buckets found"
+      aws s3 ls | grep "devsecops-${TF_WORKSPACE}" || echo "No ${TF_WORKSPACE} buckets found"
     - |
       echo "=== Checking Bucket Encryption ==="
-      for bucket in $(aws s3 ls | grep devsecops | awk '{print $3}'); do
+      for bucket in $(aws s3 ls | grep "devsecops-${TF_WORKSPACE}" | awk '{print $3}'); do
         echo "Checking encryption for $bucket"
         aws s3api get-bucket-encryption --bucket $bucket || echo "Encryption check failed"
       done
     - |
       echo "=== Checking Bucket Versioning ==="
-      for bucket in $(aws s3 ls | grep devsecops | awk '{print $3}'); do
+      for bucket in $(aws s3 ls | grep "devsecops-${TF_WORKSPACE}" | awk '{print $3}'); do
         echo "Checking versioning for $bucket"
         aws s3api get-bucket-versioning --bucket $bucket
       done
+    - |
+      echo "=== Checking Bucket Tags ==="
+      for bucket in $(aws s3 ls | grep "devsecops-${TF_WORKSPACE}" | awk '{print $3}'); do
+        echo "Tags for $bucket:"
+        aws s3api get-bucket-tagging --bucket $bucket || echo "No tags found"
+      done
   allow_failure: true
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
-  needs:
-    - terraform:apply
   when: on_success
 
-# ============== DESTROY STAGE ==============
+verify:dev:
+  <<: *verify_deployment_template
+  variables:
+    TF_WORKSPACE: "dev"
+  environment:
+    name: dev
+  needs:
+    - terraform:apply:dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
 
-terraform:destroy:
+verify:staging:
+  <<: *verify_deployment_template
+  variables:
+    TF_WORKSPACE: "staging"
+  environment:
+    name: staging
+  needs:
+    - terraform:apply:staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+
+verify:prod:
+  <<: *verify_deployment_template
+  variables:
+    TF_WORKSPACE: "prod"
+  environment:
+    name: production
+  needs:
+    - terraform:apply:prod
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ============== DESTROY STAGE ==============
+# Manual destruction of environment resources
+# ALWAYS requires manual approval - never automatic!
+
+.terraform_destroy_template: &terraform_destroy_template
   stage: destroy
   image:
     name: hashicorp/terraform:${TERRAFORM_VERSION}
@@ -240,20 +380,50 @@ terraform:destroy:
       fi
     - export AWS_REGION=${AWS_DEFAULT_REGION}
   script:
-    - echo "WARNING - This will DESTROY all infrastructure in AWS!"
+    - echo "⚠️  WARNING - DESTROY ${TF_WORKSPACE} ENVIRONMENT ⚠️"
+    - echo "This will DESTROY all infrastructure in the ${TF_WORKSPACE} environment!"
     - echo "=== Initializing Terraform ==="
     - cd ${TF_ROOT}
-    - terraform init
+    - WORKSPACE_NAME=${TF_WORKSPACE}
+    - unset TF_WORKSPACE
+    - terraform init -input=false
+    - terraform workspace select ${WORKSPACE_NAME} 2>/dev/null || terraform workspace new ${WORKSPACE_NAME}
+    - export TF_WORKSPACE=${WORKSPACE_NAME}
     - echo "=== Generating Destroy Plan ==="
-    - terraform plan -destroy -out=destroy.tfplan
-    - terraform show destroy.tfplan
+    - terraform plan -destroy -out=destroy-${TF_WORKSPACE}.tfplan
+    - terraform show destroy-${TF_WORKSPACE}.tfplan
     - echo "=== Destroying Infrastructure ==="
-    - terraform apply -auto-approve destroy.tfplan
-    - echo "Infrastructure destroyed successfully"
-  when: manual  # Manual trigger only - prevents accidental deletion
+    - terraform apply -auto-approve destroy-${TF_WORKSPACE}.tfplan
+    - echo "✅ ${TF_WORKSPACE} environment destroyed successfully"
+  when: manual
   allow_failure: false
+
+terraform:destroy:dev:
+  <<: *terraform_destroy_template
+  variables:
+    TF_WORKSPACE: "dev"
+  environment:
+    name: dev
+    action: stop
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+
+terraform:destroy:staging:
+  <<: *terraform_destroy_template
+  variables:
+    TF_WORKSPACE: "staging"
+  environment:
+    name: staging
+    action: stop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+
+terraform:destroy:prod:
+  <<: *terraform_destroy_template
+  variables:
+    TF_WORKSPACE: "prod"
   environment:
     name: production
     action: stop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'

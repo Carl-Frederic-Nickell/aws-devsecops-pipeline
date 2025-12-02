@@ -4,10 +4,12 @@
 terraform {
   required_version = ">= 1.5.0"
 
-  # Remote state backend configuration
-  # IMPORTANT: Replace these values with your own S3 bucket and DynamoDB table
-  # For first-time setup, comment out this backend block and use local state
-  # After creating your state bucket, uncomment and run `terraform init -migrate-state`
+  # Remote state backend (uses base-infrastructure S3 bucket)
+  # Terraform automatically manages separate state files per workspace:
+  # - Workspace "dev": env:/dev/devsecops-pipeline/terraform.tfstate
+  # - Workspace "staging": env:/staging/devsecops-pipeline/terraform.tfstate
+  # - Workspace "prod": env:/prod/devsecops-pipeline/terraform.tfstate
+  # - Default workspace: devsecops-pipeline/terraform.tfstate
   backend "s3" {
     bucket         = "YOUR-TERRAFORM-STATE-BUCKET"  # Replace with your bucket name
     key            = "devsecops-pipeline/terraform.tfstate"
@@ -27,12 +29,35 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
+  # Comprehensive tagging strategy (auto-applied to all resources)
+  # Aligned with organization-wide tagging standards
   default_tags {
     tags = {
-      Project     = "devsecops-pipeline"
-      Environment = var.environment
+      # Core Tags (Required)
+      Owner       = "YourName"  # Replace with your name
+      OwnerEmail  = "your.email@example.com"  # Replace with your email
+      Environment = local.environment
+      Project     = var.project_name
       ManagedBy   = "Terraform"
-      Purpose     = "DevSecOps Learning"
+
+      # Organization Tags
+      Category    = "DevSecOps"
+      Domain      = "Infrastructure"
+      ProjectType = "CI/CD Pipeline"
+
+      # Workspace Tracking
+      Workspace = terraform.workspace
+
+      # Cost Tags
+      MonthlyBudget = "0"
+      FreeTierOnly  = "true"
+      CostOptimized = "true"
+
+      # Operational Tags
+      DeployedBy      = "GitLab-CI"
+      Repository      = "github.com/your-username/aws-devsecops-pipeline"  # Replace
+      MonitoringLevel = "basic"
+      AlertsEnabled   = "false"
     }
   }
 }
@@ -42,11 +67,20 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+# ============== LOCALS ==============
+
+locals {
+  # Use workspace name as environment (dev, staging, prod)
+  # Falls back to var.environment for default workspace
+  environment = terraform.workspace == "default" ? var.environment : terraform.workspace
+}
+
 # ============== S3 BUCKET (SECURE) ==============
 
 # Main application bucket
 resource "aws_s3_bucket" "app" {
-  bucket = "${var.project_name}-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket        = "${var.project_name}-${local.environment}-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true # Allow destroy even with objects (for learning project)
 
   tags = {
     Name        = "DevSecOps Application Bucket"
@@ -115,7 +149,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "app" {
 
 # Access logging bucket
 resource "aws_s3_bucket" "logs" {
-  bucket = "${var.project_name}-logs-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  bucket        = "${var.project_name}-logs-${local.environment}-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true # Allow destroy even with objects (for learning project)
 
   tags = {
     Name        = "DevSecOps Logs Bucket"
